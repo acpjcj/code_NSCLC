@@ -1,0 +1,237 @@
+
+```{r, cache=TRUE, include=FALSE}
+# carga de librerías
+library(BiocManager)
+library(KnowSeq)
+library(R.utils)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(lattice)
+library(edgeR)
+library(PASWR2)
+
+
+set.seed(5)
+
+
+### cargo los datos que estan previamente normalizados y con un filtro tmm 
+GSE89843_patients_characteristics <- read.csv("C:/Users/cfernandez/Desktop/TFM/datos/GSE89843_patients_characteristics.csv", comment.char="#")
+GSE89843_count_matrix_tmm <- read.csv("C:/Users/cfernandez/Desktop/TFM/datos/GSE89843_count_matrix_tmm.csv")
+
+
+# Homogeneización de las matrices
+nombresmuestras <- GSE89843_count_matrix_tmm$Sample.name
+nombrecaracteristicas <- GSE89843_patients_characteristics$GEO.ID..GSE89843.
+# cambio los nombres de las características que no me sirven por los de geo y elimino los de GEO
+GSE89843_patients_characteristics$Sample.name <- nombrecaracteristicas
+GSE89843_patients_characteristics$GEO.ID..GSE89843. <- NULL
+# hay que cambiar puntos por guiones
+nombrecaracteristicas_punto_por_raya <- chartr( ".","-",GSE89843_count_matrix_tmm$Sample.name)
+GSE89843_count_matrix_tmm$Sample.name <- nombrecaracteristicas_punto_por_raya
+
+# La columna sample.name contiene los nombres de cada parte
+tablacompleta <- plyr::join(GSE89843_count_matrix_tmm, GSE89843_patients_characteristics, by = "Sample.name", type = "left", match = "all")
+# ahora hay que dividirlas en countsmatrix, caracteristicas y labels
+countsMatrixpulmon <- data.matrix(tablacompleta[2:4636])
+row.names(countsMatrixpulmon) <- tablacompleta$Sample.name
+caracteristicas <- tablacompleta[4637:4647]
+row.names(caracteristicas) <- tablacompleta$Sample.name
+labelspulmon <- tablacompleta$Classification.group
+
+
+cohorte_paper_tablacompleta <- filter(tablacompleta, Storage.time == "<12h", Matched.cohort != "NA")
+# ahora hay que dividirlas en countsmatrix, caracteristicas y labels
+countsMatrixpulmon_paper <- data.matrix(cohorte_paper_tablacompleta[2:4636])
+
+row.names(countsMatrixpulmon_paper) <- cohorte_paper_tablacompleta$Sample.name
+caracteristicas_paper <- cohorte_paper_tablacompleta[,4637:4647]
+row.names(caracteristicas_paper) <- cohorte_paper_tablacompleta$Sample.name
+labelspulmon_paper <- cohorte_paper_tablacompleta$Classification.group
+
+# esto es para la herramienta knowseq es la preparación
+caractmatriz_paper <- t(caracteristicas_paper)
+expressionMatrixpulmon_paper <- t(countsMatrixpulmon_paper)
+
+# Extraer DEGs que pasan las restricciones impuestas
+DEGsInformation_paper <- DEGsExtraction(expressionMatrixpulmon_paper, as.factor(labelspulmon_paper), lfc=5, pvalue = 0.0001, svaCorrection = F)
+# 1443 genes
+
+
+# almacenamiento de los mejores genes
+topTable_paper <- DEGsInformation_paper$Table
+DEGsMatrix_paper <- DEGsInformation_paper$DEGsMatrix
+
+genes<-c(253,372,628)
+# 364, 253,372,628 son buenos
+dataPlot(DEGsMatrix_paper[genes,],labelspulmon_paper,mode = "genesBoxplot",colours = c("#9EBC9E", "#FFAFC5"))
+
+# visualización mapa de calor de los tres genes representados antes
+dataPlot(DEGsMatrix_paper[genes,],labelspulmon_paper,mode = "heatmap",colours = c("#9EBC9E", "#FFAFC5"))
+
+# se traspone para colocar los genes como columnas
+DEGsMatrixML_paper <- t(DEGsMatrix_paper)
+
+# mRMR seleccionar los mejores max rep min red
+mrmrRanking_paper <- featureSelection(DEGsMatrixML_paper,as.factor(labelspulmon_paper),colnames(DEGsMatrixML_paper), mode = "mrmr")
+# 1443
+
+# los primeros genes de ranking son:
+
+# los primeros genes de ranking son:
+mrmr <- mrmrRanking_paper[1:15]
+mrmr1 <- mrmrRanking_paper[1:9]
+mrmr2 <- mrmrRanking_paper[10:15]
+colnames(DEGsMatrixML_paper)[mrmr1]
+colnames(DEGsMatrixML_paper)[mrmr2]
+
+
+rfRanking_paper <- featureSelection(DEGsMatrixML_paper,as.factor(labelspulmon_paper),colnames(DEGsMatrixML_paper), mode = "rf")
+
+
+# los primeros genes de ranking son:
+rfRanking_paper[1:9]
+rfRanking_paper[10:15]
+
+# este selecciona en funcion de la literatura biologica, es mas guiado
+daRanking_paper <- featureSelection(DEGsMatrixML_paper,as.factor(labelspulmon_paper),colnames(DEGsMatrixML_paper), mode = "da", disease = "Non-small cell lung cancer")
+# todo lo relacionado con la enfermedad lo coge lo que no lo pone 0
+
+# los primeros genes de ranking son:
+da <- daRanking_paper[1:15]
+names(da)[1:8]
+names(da)[9:15]
+
+# Separo train y test
+
+
+DEGsMatrix_paper <- DEGsInformation_paper$DEGsMatrix
+DEGsMatrix_paper <- as.data.frame(t(DEGsMatrix_paper))
+numDatos_paper <- dim(DEGsMatrix_paper)[1]
+numVars_paper <- dim(DEGsMatrix_paper)[2]
+index_paper <- sample(seq(1:numDatos_paper),numDatos_paper)
+numTrn_paper <- round(numDatos_paper*0.75)
+numTest_paper <- numDatos_paper - numTrn_paper
+Trn_paper <- DEGsMatrix_paper[index_paper[seq(1:numTrn_paper)],]
+Test_paper <- DEGsMatrix_paper[index_paper[(numTrn_paper+1):numDatos_paper],]
+XTrn_paper <- Trn_paper
+YTrn_paper <- labelspulmon_paper[index_paper[seq(1,numTrn_paper)]]
+XTest_paper <- Test_paper
+YTest_paper <- labelspulmon_paper[index_paper[(numTrn_paper+1):numDatos_paper]]
+
+
+#SVM
+# Los resultados del modelo con los 15 primeros genes de mrmr son:
+results_cv_svm_mrmr_paper <- svm_CV(XTrn_paper,as.factor(YTrn_paper),mrmrRanking_paper[1:15], 5)
+
+results_cv_svm_mrmr_paper$bestParameters
+
+# ACC
+results_cv_svm_mrmr_paper$accMatrix[1:5,1:8]
+results_cv_svm_mrmr_paper$accMatrix[1:5,9:15]
+
+a <- results_cv_svm_mrmr_paper$accMatrix[1:5,1:15]
+names1<-colnames(DEGsMatrixML_paper)[mrmr]
+a<-c(mean(a[,1]),mean(a[,2]),mean(a[,3]),mean(a[,4]),mean(a[,5]),mean(a[,6]),mean(a[,7]),mean(a[,8]),mean(a[,9]),mean(a[,10]),mean(a[,11]),mean(a[,12]),mean(a[,13]),mean(a[,14]),mean(a[,15]))
+a<-data.frame(t(a))
+colnames(a)<-names1
+
+# Plotting the accuracy svm_mrmr de los 15 primeros
+dataPlot(results_cv_svm_mrmr_paper$accMatrix[,1:15],mode = "classResults", main = "Accuracy for each fold Svm and Mrmr", xlab = "Genes", ylab = "Accuracy", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+dataPlot(results_cv_svm_mrmr_paper$sensMatrix[,1:15],mode = "classResults", main = "Sensitivity for each fold Svm and Mrmr", xlab = "Genes", ylab = "Sensitivity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+dataPlot(results_cv_svm_mrmr_paper$specMatrix[,1:15],mode = "classResults", main = "Specificity for each fold Svm and Mrmr", xlab = "Genes", ylab = "Specificity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+dataPlot(results_cv_svm_mrmr_paper$cfMats[[1]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_svm_mrmr_paper$cfMats[[2]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_svm_mrmr_paper$cfMats[[3]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_svm_mrmr_paper$cfMats[[4]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_svm_mrmr_paper$cfMats[[5]]$table,labelspulmon_paper,mode = "confusionMatrix")
+
+# RF
+# Los resultados del modelo con los 15 primeros genes de mrmr son:
+results_cv_rf_mrmr_paper <- rf_CV(XTrn_paper,as.factor(YTrn_paper),names(mrmrRanking_paper)[1:15],numFold = 5)
+
+# ACC
+results_cv_rf_mrmr_paper$accMatrix[1:5,1:8]
+results_cv_rf_mrmr_paper$accMatrix[1:5,9:15]
+d<-results_cv_rf_mrmr_paper$accMatrix[1:5,1:15]
+names1<-colnames(DEGsMatrixML_paper)[mrmr]
+d<-c(mean(d[,1]),mean(d[,2]),mean(d[,3]),mean(d[,4]),mean(d[,5]),mean(d[,6]),mean(d[,7]),mean(d[,8]),mean(d[,9]),mean(d[,10]),mean(d[,11]),mean(d[,12]),mean(d[,13]),mean(d[,14]),mean(d[,15]))
+
+d<-data.frame(t(d))
+colnames(d)<-names1
+
+# Plotting rf_mrmr de los 15 primeros
+dataPlot(results_cv_rf_mrmr_paper$accMatrix[,1:15],mode = "classResults", main = "Accuracy for each fold Random Forest and Mrmr", xlab = "Genes", ylab = "Accuracy", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+# Plotting the sensitivity of all the folds evaluated in the CV process first 15 genes
+dataPlot(results_cv_rf_mrmr_paper$sensMatrix[,1:15],mode = "classResults", main = "Sensitivity for each fold Random Forest and Mrmr", xlab = "Genes", ylab = "Sensitivity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+dataPlot(results_cv_rf_mrmr_paper$specMatrix[,1:15],mode = "classResults", main = "Specificity for each fold Random Forest and Mrmr", xlab = "Genes", ylab = "Specificity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+
+dataPlot(results_cv_rf_mrmr_paper$cfMats[[1]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_rf_mrmr_paper$cfMats[[2]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_rf_mrmr_paper$cfMats[[3]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_rf_mrmr_paper$cfMats[[4]]$table,labelspulmon_paper,mode = "confusionMatrix")
+dataPlot(results_cv_rf_mrmr_paper$cfMats[[5]]$table,labelspulmon_paper,mode = "confusionMatrix")
+
+#KNN
+# Los resultados del modelo con los 15 primeros genes de random forest son:
+# random forest
+results_cv_knn_rf_paper <-knn_CV(XTrn_paper,as.factor(YTrn_paper),rfRanking_paper[1:15], 5)
+results_cv_knn_rf_paper$bestK[,1]
+
+# ACC
+results_cv_knn_rf_paper$accMatrix[1:5,1:8]
+results_cv_knn_rf_paper$accMatrix[1:5,9:15]
+h<-results_cv_knn_rf_paper$accMatrix[1:5,1:15]
+
+names1<-rfRanking_paper[1:15]
+h<-c(mean(h[,1]),mean(h[,2]),mean(h[,3]),mean(h[,4]),mean(h[,5]),mean(h[,6]),mean(h[,7]),mean(h[,8]),mean(h[,9]),mean(h[,10]),mean(h[,11]),mean(h[,12]),mean(h[,13]),mean(h[,14]),mean(h[,15]))
+
+h<-data.frame(t(h))
+colnames(h)<-names1
+
+# Plotting knn-rf de los 15 primeros
+dataPlot(results_cv_knn_rf_paper$accMatrix[,1:15],mode = "classResults", main = "Accuracy for each fold Knn and Random Forest", xlab = "Genes", ylab = "Accuracy", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+# Plotting the sensitivity of all the folds evaluated in the CV process first 15 genes
+dataPlot(results_cv_knn_rf_paper$sensMatrix[,1:15],mode = "classResults", main = "Sensitivity for each fold Knn and Random Forest", xlab = "Genes", ylab = "Sensitivity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+dataPlot(results_cv_knn_rf_paper$specMatrix[,1:15],mode = "classResults", main = "Specificity for each fold Knn and Random Forest", xlab = "Genes", ylab = "Specificity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+# Plotting the sensitivity of all the folds evaluated in the CV process first 15 genes
+dataPlot(results_cv_knn_rf_paper$sensMatrix[,1:15],mode = "classResults", main = "Sensitivity for each fold Knn and Random Forest", xlab = "Genes", ylab = "Sensitivity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+dataPlot(results_cv_knn_rf_paper$specMatrix[,1:15],mode = "classResults", main = "Specificity for each fold Knn and Random Forest", xlab = "Genes", ylab = "Specificity", colours = c("#FFCFD2","#FFAFC5","#553E4E","#E0479E","#9EBC9E"))
+
+
+#####################TEST#####################
+
+# svm_test 
+bestParametersmrmr_paper <- results_cv_svm_mrmr_paper$bestParameters
+bestParametersrf_paper <- results_cv_svm_rf_paper$bestParameters
+bestParametersda_paper <- results_cv_svm_da_paper$bestParameters
+set.seed(5)
+results_test_svmmrmr_paper <- svm_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(mrmrRanking_paper)[1:50],bestParametersmrmr_paper)
+set.seed(5)
+results_test_svmrf_paper <- svm_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,rfRanking_paper[1:50],bestParametersrf_paper)
+set.seed(5)
+results_test_svmda_paper <- svm_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(daRanking_paper)[1:50],bestParametersda_paper)
+
+######################### Random Forest ##############
+
+
+results_test_rfmrmr_paper <- rf_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(mrmrRanking_paper)[1:30])
+results_test_rfrf_paper <- rf_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,rfRanking_paper[1:30])
+results_test_rfda_paper <- rf_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(daRanking_paper)[1:30])
+
+###### knn  ##############
+bestKmrmr_paper <- results_cv_knn_mrmr_paper$bestK
+bestKrf_paper <- results_cv_knn_rf_paper$bestK
+bestKda_paper <- results_cv_knn_da_paper$bestK
+results_test_knnmrmr_paper <- knn_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(mrmrRanking_paper)[1:30], bestKmrmr_paper)
+results_test_knnrf_paper <- knn_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,rfRanking_paper[1:30],bestKrf_paper)
+results_test_knnda_paper <- knn_test(XTrn_paper,YTrn_paper,XTest_paper,YTest_paper,names(daRanking_paper)[1:30],bestKda_paper)
+```
